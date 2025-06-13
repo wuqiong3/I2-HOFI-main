@@ -4,7 +4,11 @@ import yaml, json
 import numpy as np
 import wandb
 
+
+
 import tensorflow as tf
+# Import Intel Extension for TensorFlow for XPU support
+import intel_extension_for_tensorflow as itex
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import LearningRateScheduler
 from tensorflow.keras.optimizers import Adam, SGD
@@ -90,21 +94,125 @@ print('\n Dataset Location --> ', dataset_dir, '\n', 'no_of_class --> ', nb_clas
 print('_________________ Wandb_Logging _______________ : ', wandb_log)
 print(' ')
 
-"""  << Additonal parameters and device settings >>  """
-os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+"""  << Intel XPU Device Configuration >>  """
 
-# # Check if the environment variable is set, and set it to 'cuda_malloc_async' if not
-# if "TF_GPU_ALLOCATOR" not in os.environ:
-#     os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
-    
-gpu_options = tf.compat.v1.GPUOptions(per_process_gpu_memory_fraction = gpu_utilisation)
-sess = tf.compat.v1.Session(config = tf.compat.v1.ConfigProto(gpu_options = gpu_options))
+def configure_intel_xpu():
+    """配置Intel XPU设备"""
+    print("=" * 60)
+    print("Intel XPU 设备配置")
+    print("=" * 60)
+
+    # 检查Intel Extension for TensorFlow
+    try:
+        print(f"Intel Extension for TensorFlow版本: {itex.__version__}")
+        print("✓ Intel Extension for TensorFlow已加载")
+    except Exception as e:
+        print(f"✗ Intel Extension for TensorFlow加载失败: {e}")
+        return False, None
+
+    # 检查物理设备
+    physical_devices = tf.config.list_physical_devices()
+    print(f"可用物理设备: {[d.name for d in physical_devices]}")
+
+    # 检查XPU设备
+    xpu_devices = tf.config.list_physical_devices('XPU')
+    gpu_devices = tf.config.list_physical_devices('GPU')
+
+    if xpu_devices:
+        print(f"✓ 检测到 {len(xpu_devices)} 个XPU设备:")
+        for i, device in enumerate(xpu_devices):
+            print(f"  XPU:{i} - {device.name}")
+
+        # 配置XPU内存增长
+        try:
+            for xpu in xpu_devices:
+                tf.config.experimental.set_memory_growth(xpu, True)
+            print("✓ XPU内存增长配置成功")
+        except Exception as e:
+            print(f"⚠ XPU内存配置警告: {e}")
+
+        return True, 'XPU'
+
+    elif gpu_devices:
+        print(f"✓ 检测到 {len(gpu_devices)} 个GPU设备:")
+        for i, device in enumerate(gpu_devices):
+            print(f"  GPU:{i} - {device.name}")
+
+        # 配置GPU内存增长
+        try:
+            for gpu in gpu_devices:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print("✓ GPU内存增长配置成功")
+        except Exception as e:
+            print(f"⚠ GPU内存配置警告: {e}")
+
+        return True, 'GPU'
+    else:
+        print("ℹ 未检测到XPU或GPU设备，使用CPU")
+        return True, 'CPU'
+
+def get_device_strategy(device_type, gpu_id):
+    """获取设备策略"""
+    if device_type == 'XPU':
+        if gpu_id >= 0:
+            device_name = f'/XPU:{gpu_id}'
+            print(f"✓ 使用指定的XPU设备: {device_name}")
+        else:
+            device_name = '/XPU:0'
+            print(f"✓ 使用默认XPU设备: {device_name}")
+        return device_name
+    elif device_type == 'GPU':
+        if gpu_id >= 0:
+            device_name = f'/GPU:{gpu_id}'
+            print(f"✓ 使用指定的GPU设备: {device_name}")
+        else:
+            device_name = '/GPU:0'
+            print(f"✓ 使用默认GPU设备: {device_name}")
+        return device_name
+    else:
+        print("✓ 使用CPU设备")
+        return '/CPU:0'
+
+def create_optimized_session_config(device_type, gpu_utilisation):
+    """创建优化的会话配置"""
+    config = tf.compat.v1.ConfigProto()
+    config.allow_soft_placement = True
+    config.inter_op_parallelism_threads = 0  # 使用所有可用核心
+    config.intra_op_parallelism_threads = 0  # 使用所有可用核心
+
+    if device_type in ['XPU', 'GPU']:
+        # 对于XPU和GPU，设置内存分配
+        if device_type == 'GPU':
+            config.gpu_options.per_process_gpu_memory_fraction = gpu_utilisation
+            config.gpu_options.allow_growth = True
+        print(f"✓ {device_type}会话配置完成，内存使用率: {gpu_utilisation}")
+    else:
+        print("✓ CPU会话配置完成")
+
+    return config
+
+# 配置Intel XPU
+has_accelerator, device_type = configure_intel_xpu()
+device_strategy = get_device_strategy(device_type, gpu_id)
+
+# 创建会话配置
+session_config = create_optimized_session_config(device_type, gpu_utilisation)
+sess = tf.compat.v1.Session(config=session_config)
+
+# 兼容性设置
+if device_type == 'GPU':
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
 tf.compat.v1.disable_eager_execution()
+
+print("=" * 60)
+print(f"设备配置完成 - 使用: {device_type}")
+print("=" * 60)
 
 #################################### LOGGING, BUILDING & TRAINING MODEL #############################################
 # ============== Wandb LOGGING Parameters ======================= #
 if wandb_log:
-    wandb.login(key=API_key) # WandB API key
+    wandb.login(key="4ca920c713ce2c8409d420dac4cc4361075f47ad") # WandB API key
     wrun=wandb.init(
         project = wb_proj_name,
         name = model_name if run_name == 'None' else run_name,
@@ -212,9 +320,19 @@ else:
     # Setting FILENAME for Saving model checkpoint
     if not load_model:
         try:
-            checkpoint_path = output_model_dir + '|' + wrun.id + '|' + dataset + '|' + backbone + '|Bs:' + str(batch_size) + '|init_lr:' + str(lr) + '|epoch:{:03d}' + '|lr:{:.6f}' + '|valAcc{:.4f}' +'.h5'
+            filename_parts = [
+                wrun.id, dataset, backbone, f"Bs-{batch_size}",
+                f"init_lr-{lr}", "epoch-{:03d}", "lr-{:.6f}", "valAcc-{:.4f}.h5"
+            ]
+            safe_filename = "-".join(str(p) for p in filename_parts)
+            checkpoint_path = os.path.join(output_model_dir, safe_filename)
         except NameError:
-            checkpoint_path = output_model_dir  + '|' + dataset + '|' + backbone + '|Bs:' + str(batch_size) + '|init_lr:' + str(lr) + '|epoch:{:03d}' + '|lr:{:.6f}' + '|valAcc{:.4f}' +'.h5'
+            filename_parts = [
+                dataset, backbone, f"Bs-{batch_size}",
+                f"init_lr-{lr}", "epoch-{:03d}", "lr-{:.6f}", "valAcc-{:.4f}.h5"
+            ]
+            safe_filename = "-".join(str(p) for p in filename_parts)
+            checkpoint_path = os.path.join(output_model_dir, safe_filename)
 
     # =========== Custom CALLBACKS to record Validation metrics ============= #
     callbacks.append(
@@ -242,10 +360,11 @@ else:
         print('_____________ Checkpoint path to Load Pretrained Model _____________ :', checkpoint_path)
         model.load_weights(checkpoint_path)
     
-    optimizer = SGD(learning_rate = lr) 
+    # Use TensorFlow 1.x compatible optimizer
+    optimizer = tf.compat.v1.train.AdamOptimizer(learning_rate = lr)
     model.compile(optimizer=optimizer,
                   loss='categorical_crossentropy',
-                  metrics=['acc'])
+                  metrics=['accuracy'])
     
     ##################################################################
     # ################## Training Model ############################ #
