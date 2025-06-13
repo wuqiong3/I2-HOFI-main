@@ -29,16 +29,24 @@ class ValCallback(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs={}):
 
-        if tf.executing_eagerly():
-            lr = self.model.optimizer.lr.numpy()
-        else:
-            lr = keras.backend.get_value(self.model.optimizer.lr)
+        # Handle different optimizer types for learning rate extraction
+        try:
+            if tf.executing_eagerly():
+                lr = self.model.optimizer.lr.numpy()
+            else:
+                lr = keras.backend.get_value(self.model.optimizer.lr)
+        except AttributeError:
+            # For TF 1.x compatible optimizers
+            try:
+                lr = keras.backend.get_value(self.model.optimizer._lr)
+            except:
+                lr = 0.001  # fallback learning rate
         print(' - lr : ', lr)
 
         if self.wandb_log:
             # Log epoch, training accuracy and loss
             wandb.log({'epoch' : epoch})
-            wandb.log({'loss': logs['loss'], 'acc': logs['acc']})
+            wandb.log({'loss': logs['loss'], 'accuracy': logs['accuracy']})
             wandb.log({'lr': lr})
             
 
